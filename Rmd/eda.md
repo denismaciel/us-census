@@ -453,7 +453,8 @@ train %>%
              education,
              fill = `over 50k`)) +
   geom_tile() +
-  geom_text(aes(label = paste(scales::percent(`over 50k`), " (", n, ")", sep = "")), color = "white")
+  geom_text(aes(label = scales::percent(`over 50k`)), size = 3, color = "white") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 ![](eda_files/figure-gfm/unnamed-chunk-11-1.png)<!-- -->

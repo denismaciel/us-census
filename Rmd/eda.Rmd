@@ -2,11 +2,15 @@
 title: "Exploratory Data Analysis"
 author: "Denis Maciel"
 date: "03/03/2019"
-output: html_document
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
 ```
 
 First, read in the train dataset. The column names are missing, so we need to extract them from the documentation (`./us_census_full/census_income_metadata.txt`)
@@ -113,7 +117,8 @@ skm %>%
 ### Distribution of numerical variables
 
 * `own_business_or_self_employed` and `veterans_benefits` are in fact categorical variables encoded as numeric.
-* 
+* For high income, `weeks_worked_in_year` is very concentrated around 52 worked weeks (1st quartile, median and 3rd quartile are all 52 weeks). Or, from another angle, everything below 52 weeks is considered by the boxplot as an outlier. For low income, the 1st quartile worked 0 week, while the 3rd quartile worked 52 weeks, with the median number of worked weeks lying somewhere around 43 weeks.
+* `wage_per_hour`, `capital_losses`, `dividends_from_stock`,`capital_gains` are all highly skewed to the right. We mitigate the skewness by log-transforming them.
 
 ```{r}
 numeric_cols <- train %>% 
@@ -266,7 +271,8 @@ train %>%
              education,
              fill = `over 50k`)) +
   geom_tile() +
-  geom_text(aes(label = paste(scales::percent(`over 50k`), " (", n, ")", sep = "")), color = "white")
+  geom_text(aes(label = scales::percent(`over 50k`)), size = 3, color = "white") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 ```{r}

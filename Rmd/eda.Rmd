@@ -1,0 +1,289 @@
+---
+title: "Exploratory Data Analysis"
+author: "Denis Maciel"
+date: "03/03/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+First, read in the train dataset. The column names are missing, so we need to extract them from the documentation (`./us_census_full/census_income_metadata.txt`)
+
+```{r}
+library(tidyverse)
+library(here)
+
+col_string <- glue::glue("
+|   91 distinct values for attribute #0 (age) continuous
+|    9 distinct values for attribute #1 (class of worker) nominal
+|   52 distinct values for attribute #2 (detailed industry recode) nominal
+|   47 distinct values for attribute #3 (detailed occupation recode) nominal
+|   17 distinct values for attribute #4 (education) nominal
+| 1240 distinct values for attribute #5 (wage per hour) continuous
+|    3 distinct values for attribute #6 (enroll in edu inst last wk) nominal
+|    7 distinct values for attribute #7 (marital stat) nominal
+|   24 distinct values for attribute #8 (major industry code) nominal
+|   15 distinct values for attribute #9 (major occupation code) nominal
+|    5 distinct values for attribute #10 (race) nominal
+|   10 distinct values for attribute #11 (hispanic origin) nominal
+|    2 distinct values for attribute #12 (sex) nominal
+|    3 distinct values for attribute #13 (member of a labor union) nominal
+|    6 distinct values for attribute #14 (reason for unemployment) nominal
+|    8 distinct values for attribute #15 (full or part time employment stat) nominal
+|  132 distinct values for attribute #16 (capital gains) continuous
+|  113 distinct values for attribute #17 (capital losses) continuous
+| 1478 distinct values for attribute #18 (dividends from stocks) continuous
+|    6 distinct values for attribute #19 (tax filer stat) nominal
+|    6 distinct values for attribute #20 (region of previous residence) nominal
+|   51 distinct values for attribute #21 (state of previous residence) nominal
+|   38 distinct values for attribute #22 (detailed household and family stat) nominal
+|    8 distinct values for attribute #23 (detailed household summary in household) nominal
+|    (instance weight)
+|   10 distinct values for attribute #24 (migration code-change in msa) nominal
+|    9 distinct values for attribute #25 (migration code-change in reg) nominal
+|   10 distinct values for attribute #26 (migration code-move within reg) nominal
+|    3 distinct values for attribute #27 (live in this house 1 year ago) nominal
+|    4 distinct values for attribute #28 (migration prev res in sunbelt) nominal
+|    7 distinct values for attribute #29 (num persons worked for employer) continuous
+|    5 distinct values for attribute #30 (family members under 18) nominal
+|   43 distinct values for attribute #31 (country of birth father) nominal
+|   43 distinct values for attribute #32 (country of birth mother) nominal
+|   43 distinct values for attribute #33 (country of birth self) nominal
+|    5 distinct values for attribute #34 (citizenship) nominal
+|    3 distinct values for attribute #35 (own business or self employed) nominal
+|    3 distinct values for attribute #36 (fill inc questionnaire for veteran's admin) nominal
+|    3 distinct values for attribute #37 (veterans benefits) nominal
+|   53 distinct values for attribute #38 (weeks worked in year) continuous
+|    2 distinct values for attribute #39 (year) nominal")
+
+col_names <- col_string %>%
+  str_split("\\n") %>% 
+  .[[1]] %>% 
+  str_extract("\\((.*?)\\)") %>% 
+  str_remove_all("\\(|\\)|'") %>% 
+  str_replace_all(" ", "_")
+
+col_names <- c(col_names, "income")
+
+train_raw <- readr::read_csv(here("us_census_full/census_income_learn.csv"), 
+                             col_names = col_names, 
+                             na = "?") 
+train <- train_raw %>% 
+  mutate(id = row_number(),
+         income = ifelse(income == "- 50000.", "under 50k", "over 50k"))
+```
+
+## Task 
+
+  The aim of this analysis is to develop a model for a binary classification. The model needs to tell apart respondents that earn more than 50k (high income earners) from respondents who earn less than 50k (low income earners). `income` is the target variable in the data set. 
+  
+Note that the target variable is imbalanced: we have 94% of respondents who make less than 50k.
+
+```{r}
+train %>% 
+  count(income) %>% 
+  mutate(pp = n/sum(n) * 100)
+```
+
+
+## Missing Values
+
+Before diving into the data, it's important to assess the quality of the data we have at our disposal. 
+
+```{r}
+skm <- skimr::skim(train) 
+skm
+```
+
+### Missing values do we have per column? 
+
+* Only 8 columns have missing values at all.
+* Missing values are mostly related to geographic origin of respondent.
+* Columns starting with "migration_" have close to 50% of missing data. For the sake of simplicity, we won't consider them when modeling.
+
+```{r}
+skm %>% 
+  as_tibble() %>% 
+  filter(stat == "missing") %>% 
+  arrange(desc(value))
+```
+
+### Distribution of numerical variables
+
+* `own_business_or_self_employed` and `veterans_benefits` are in fact categorical variables encoded as numeric.
+* 
+
+```{r}
+numeric_cols <- train %>% 
+  map_lgl(is.numeric) %>% 
+  which()
+
+train %>% 
+  filter(age > 16) %>% 
+  select(numeric_cols, income, -id, -instance_weight, -ends_with("_recode")) %>% 
+  gather(key, value, -income) %>% 
+  ggplot(aes(income, value)) + 
+  geom_boxplot(alpha = 0.3) +
+  facet_wrap(~ key, scales = "free_y")
+```
+
+### Age & Sex
+
+Age and sex are very important features:
+
+* In fact, if the respondent is younger than 16, we can be sure that she is a low income earner. **When training a model, we will remove respondents under 16. When predicting on unseen data, we will manually assign the low income class to respondents that are under 16**. By doing so, we make our model less complex and faster to train.
+* Males have on average higher income than females.
+* Respondents with high income concentrate around 40 years for both sex..
+
+```{r}
+theme_set(theme_minimal())
+
+breaks <- c(seq(-0.01, 90, by = 3), 100)
+labels <- paste(
+  round(breaks[-length(breaks)]),
+  round(breaks[-1]),
+  sep= " - "
+)
+test <- train %>% 
+  transmute(
+    age_bucket = cut(age, breaks = breaks, labels = labels),
+    sex_income = paste(sex, income) %>% fct_rev,
+    sex)
+test %>% 
+  ggplot(aes(x = age_bucket)) + 
+  geom_bar(data = filter(test, sex == "Female"),
+           aes(fill = sex_income)) + 
+  geom_bar(data = filter(test, sex == "Male"),
+           aes(fill = sex_income, y = ..count.. * (-1))) + 
+  scale_fill_manual(values = c("#93628A", "#B48EAD", "#34506C", "#80A1C1")) +
+  scale_y_continuous(breaks = seq(-5000, 5000, 1000),
+                     labels = abs(seq(-5000, 5000, 1000))) + 
+  coord_flip() +
+  labs(title = "Population Pyramid",
+       subtitle = "High earners distribution marked by darker shade",
+       fill = NULL,  
+       y = NULL,
+       x = NULL)
+```
+
+### Education
+
+Education is also an important factor when comes to predicting income:
+
+* As one might have expected, higher level of education are deeply associated with high incomes.
+* 100% of Children are low income, which speaks in favor of the consistency of the data. As we had seen before, all respondents under 16 also low income.
+* It's interesting to notice that there is **very low variation in the percentage of high income across respondents that haven't completed high school.** No matter if you have completed up to the 4th or 12th grade, chances are extremely high you make less than 50k a year. There is probably high variation within these buckets, i.e. respondetns that completed, say, the 10th grade probably have a significantly higher median salary than respondents with the 4th grade only. But since they both make less than 50k, they are grouped in the same bucket. 
+
+```{r}
+train %>% 
+  count(education, income, sort = TRUE) %>% 
+  group_by(education) %>% 
+  mutate(pp = n/sum(n)) %>%
+  # Order education according to % of high income
+  ungroup() %>% 
+  select(-n) %>% 
+  spread(income, pp, fill = 0) %>% 
+  mutate(education = fct_reorder(education, `over 50k`)) %>% 
+  gather(income, pp, -education) %>% 
+  # End order education
+  ggplot(aes(education, pp, fill = income)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  coord_flip() +
+  labs(title  = "% of high and low income across education level",
+       subtitle = "Education levels are ordered according to % of high income",
+       fill = NULL,
+       x = NULL,
+       y = NULL)
+```
+
+### Ethinicity
+
+```{r}
+train %>% 
+  count(race, income, sort = TRUE) %>% 
+  group_by(race) %>% 
+  mutate(pp = n/sum(n)) %>%
+  # Order education according to % of high income
+  ungroup() %>% 
+  select(-n) %>% 
+  spread(income, pp, fill = 0) %>% 
+  mutate(race = fct_reorder(race, `over 50k`)) %>% 
+  gather(income, pp, -race) %>% 
+  # End order education
+  ggplot(aes(race, pp, fill = income)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  coord_flip() +
+  labs(title  = "% of high and low income across education level",
+       subtitle = "Races are ordered according to % of high income",
+       fill = NULL,
+       x = NULL,
+       y = NULL)
+```
+
+### Citizenship 
+
+```{r}
+train %>% 
+  count(citizenship, income, sort = TRUE) %>% 
+  spread(income, n) %>% 
+  mutate(pp_over_50k = 100 * `over 50k`/(`over 50k` + `under 50k`))
+```
+
+### Unemployment
+
+```{r}
+#TODO: create unemployed boolean variable
+train %>% 
+  count(reason_for_unemployment, income) %>% 
+  spread(income, n) %>% 
+  mutate(pp_over_50k = 100 * `over 50k`/`over 50k` + `under 50k`)
+```
+
+### Employment type vs education
+
+```{r}
+train %>% 
+  filter(education != "Children") %>% 
+  mutate(education = ifelse(str_detect(education, "grade"), "High School Dropout", education)) %>%
+  count(full_or_part_time_employment_stat, education, income, sort = TRUE) %>% 
+  group_by(full_or_part_time_employment_stat, education) %>% 
+  mutate(pp = n/sum(n)) %>% 
+  ungroup() %>% 
+  select(-n) %>% 
+  spread(income, pp, fill = 0) %>% 
+  left_join(train %>%
+              filter(education != "Children") %>% 
+              mutate(education = ifelse(str_detect(education, "grade"), "High School Dropout", education)) %>%
+              count(full_or_part_time_employment_stat, education),
+            by = c("education", "full_or_part_time_employment_stat")) %>% 
+  mutate(employment_type = fct_reorder(full_or_part_time_employment_stat, `over 50k`),
+         education = fct_reorder(education, `over 50k`)) %>% 
+  ggplot(aes(employment_type, 
+             education,
+             fill = `over 50k`)) +
+  geom_tile() +
+  geom_text(aes(label = paste(scales::percent(`over 50k`), " (", n, ")", sep = "")), color = "white")
+```
+
+```{r}
+knitr::knit_exit()
+```
+
+## Scratch
+
+```{r}
+train %>% 
+  select(id, income, weeks_worked_in_year, wage_per_hour, income) %>% 
+  mutate(log_wage = log(wage_per_hour)) %>% 
+  select(-wage_per_hour) %>% 
+  gather(key, value, -income, -id) %>% 
+  ggplot(aes(value, fill = income)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ key)
+```
+
+

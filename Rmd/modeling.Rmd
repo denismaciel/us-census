@@ -1,0 +1,377 @@
+---
+title: "Modeling"
+author: "Denis Maciel"
+date: "06/03/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(here)
+
+col_string <- glue::glue("
+|   91 distinct values for attribute #0 (age) continuous
+|    9 distinct values for attribute #1 (class of worker) nominal
+|   52 distinct values for attribute #2 (detailed industry recode) nominal
+|   47 distinct values for attribute #3 (detailed occupation recode) nominal
+|   17 distinct values for attribute #4 (education) nominal
+| 1240 distinct values for attribute #5 (wage per hour) continuous
+|    3 distinct values for attribute #6 (enroll in edu inst last wk) nominal
+|    7 distinct values for attribute #7 (marital stat) nominal
+|   24 distinct values for attribute #8 (major industry code) nominal
+|   15 distinct values for attribute #9 (major occupation code) nominal
+|    5 distinct values for attribute #10 (race) nominal
+|   10 distinct values for attribute #11 (hispanic origin) nominal
+|    2 distinct values for attribute #12 (sex) nominal
+|    3 distinct values for attribute #13 (member of a labor union) nominal
+|    6 distinct values for attribute #14 (reason for unemployment) nominal
+|    8 distinct values for attribute #15 (full or part time employment stat) nominal
+|  132 distinct values for attribute #16 (capital gains) continuous
+|  113 distinct values for attribute #17 (capital losses) continuous
+| 1478 distinct values for attribute #18 (dividends from stocks) continuous
+|    6 distinct values for attribute #19 (tax filer stat) nominal
+|    6 distinct values for attribute #20 (region of previous residence) nominal
+|   51 distinct values for attribute #21 (state of previous residence) nominal
+|   38 distinct values for attribute #22 (detailed household and family stat) nominal
+|    8 distinct values for attribute #23 (detailed household summary in household) nominal
+|    (instance weight)
+|   10 distinct values for attribute #24 (migration code-change in msa) nominal
+|    9 distinct values for attribute #25 (migration code-change in reg) nominal
+|   10 distinct values for attribute #26 (migration code-move within reg) nominal
+|    3 distinct values for attribute #27 (live in this house 1 year ago) nominal
+|    4 distinct values for attribute #28 (migration prev res in sunbelt) nominal
+|    7 distinct values for attribute #29 (num persons worked for employer) continuous
+|    5 distinct values for attribute #30 (family members under 18) nominal
+|   43 distinct values for attribute #31 (country of birth father) nominal
+|   43 distinct values for attribute #32 (country of birth mother) nominal
+|   43 distinct values for attribute #33 (country of birth self) nominal
+|    5 distinct values for attribute #34 (citizenship) nominal
+|    3 distinct values for attribute #35 (own business or self employed) nominal
+|    3 distinct values for attribute #36 (fill inc questionnaire for veteran's admin) nominal
+|    3 distinct values for attribute #37 (veterans benefits) nominal
+|   53 distinct values for attribute #38 (weeks worked in year) continuous
+|    2 distinct values for attribute #39 (year) nominal")
+
+col_names <- col_string %>%
+  str_split("\\n") %>% 
+  .[[1]] %>% 
+  str_extract("\\((.*?)\\)") %>% 
+  str_remove_all("\\(|\\)|'") %>% 
+  str_replace_all(" ", "_")
+
+col_names <- c(col_names, "income")
+
+us_census_raw <- readr::read_csv(here("us_census_full/census_income_learn.csv"), 
+                                 col_names = col_names, 
+                                 na = "?") 
+us_census <- us_census_raw %>% 
+  mutate(id = row_number(),
+         income = ifelse(income == "- 50000.", "under 50k", "over 50k"))
+```
+
+Remove children from data set, since they are all low income.
+
+```{r}
+us_census <- us_census %>% 
+  filter(age > 16)
+```
+
+A note on terminology:
+
+* Train and test refer to the initial split. We won't be looking at the test at all during the whole analysis.
+* In order to train the models, we will be using cross-validation, i.e. the train set will be divided into subsamples. 
+* *Analysis set* is the data the model is trained on.
+* *Assessment set* is the data over which the model's accuracy is measured.
+
+```{r}
+# us_census <- us_census %>% 
+#   dplyr::sample_frac(0.1)
+```
+
+
+```{r}
+UPSAMPLE = TRUE
+# # Use percentage of data to speed up training
+# us_census <- us_census %>%
+#   dplyr::sample_frac(0.15)
+
+library(recipes)
+
+initial_split <- rsample::initial_split(us_census)
+
+train <- rsample::training(initial_split)
+test <- rsample::testing(initial_split)
+```
+
+Upsample
+
+```{r}
+if (UPSAMPLE) {
+  N_HIGH_INCOMES <- train %>% 
+    filter(income == "over 50k") %>% 
+    nrow()
+  
+  train <- train %>% 
+    nest(-income) %>% 
+    mutate(sampled_income = map(data, ~ sample_n(.x, N_HIGH_INCOMES))) %>% 
+    select(income, sampled_income) %>% 
+    unnest()
+  
+  assertthat::assert_that(N_HIGH_INCOMES * 2 == nrow(train), msg = "Unexpeted number of rows in upsample data set")
+}
+```
+
+Prepare the design matrix and create cross-validation.
+
+```{r}
+library(recipes)
+library(purrr)
+
+rec <-  train %>% 
+  select(-id,
+         -year,
+         -starts_with("migration_"),
+         -ends_with("_recode"),
+         -instance_weight) %>% 
+  recipe(income ~ .) %>% 
+  step_other(all_predictors(), -all_numeric(), threshold = 0.10) %>% 
+  step_modeimpute(all_nominal()) %>% 
+  step_meanimpute(all_numeric()) %>% 
+  step_dummy(all_predictors(), -all_numeric())
+
+df <- rsample::vfold_cv(train, v = 5)
+
+# Prepper takes a split object and trains the model matrix on analysis set
+df <- df %>% 
+  # Prepare the model matrix: compute median, mode, transform into dummies...
+  mutate(prepped = map(splits, ~ recipes::prepper(recipe = rec, .x))) %>% 
+  mutate(
+    train_processed = map2(splits, prepped, function(.x, .y) {
+      analysis_set <- rsample::analysis(.x)
+      processed <- bake(.y, new_data = analysis_set)
+      return(processed)
+    }),
+    test_processed = map2(splits, prepped, function(.x, .y) {
+      assessment_set <- rsample::assessment(.x)
+      processed <- bake(.y, new_data = assessment_set)
+      return(processed)
+    }))
+```
+
+### Model
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+# # Test single models here
+# library(parsnip)
+
+# mod_xgboost <- boost_tree(mode = "classification", trees = 20) %>%
+#   set_engine("C5.0") %>%
+#   fit(income ~ ., data = processed_train)
+
+# mod_logit <- parsnip::logistic_reg(mode = "classification") %>% 
+#   set_engine("glm") %>% 
+#   fit(income ~ ., data = processed_train)
+```
+
+```{r}
+library(parsnip)
+
+mod_spec_xgboost <- boost_tree(mode = "classification", trees = 20) %>%
+  set_engine("C5.0")
+
+mod_spec_logit <- parsnip::logistic_reg(mode = "classification") %>%
+  set_engine("glm")
+
+models <- tribble(~model_type, ~model_spec,
+                  "logit", mod_spec_logit,
+                  "xgboost", mod_spec_xgboost)
+
+df <- df %>% 
+  crossing(models) %>% 
+  mutate(model_trained = map2(train_processed, model_spec, function(.x, .y) {
+    parsnip::fit(object = .y,
+                 formula = income ~ .,
+                 data = .x)
+  }))
+```
+
+## Model evaluation
+
+```{r}
+predict_income_class <- function(test_data, model) {
+  parsnip::predict_class(model, new_data = test_data)
+}
+
+predict_income_prob <- function(test_data, model) {
+  parsnip::predict_classprob(model, new_data = test_data) %>% 
+    pull(`under 50k`)
+}
+
+df <- df %>% 
+  mutate(pred_class = map2(test_processed, model_trained, predict_income_class),
+         pred_prob = map2(test_processed, model_trained, predict_income_prob),
+         true = map(test_processed, "income"))
+
+model_metrics <- df %>% 
+  select(id, model_type, pred_class, pred_prob, true) %>% 
+  unnest()
+```
+
+### Accuracy
+
+```{r}
+accuracy <- model_metrics %>% 
+  mutate(is_correct = pred_class == true) %>% 
+  group_by(id, model_type) %>% 
+  summarise(pp_correct = sum(is_correct)/n()) 
+
+# Nicer Formatting
+accuracy %>% 
+  spread(model_type, pp_correct) %>% 
+  mutate(diff = logit - xgboost)
+```
+
+### Area under the curve
+
+```{r}
+auc <- model_metrics %>% 
+  nest(-id, -model_type, .key = "pred_true") %>% 
+  mutate(auc = map(pred_true, ~ yardstick::roc_auc(.x, true, pred_prob))) %>% 
+  select(-pred_true) %>% 
+  unnest() 
+
+# Nicer formatting
+auc %>% 
+  spread(model_type, .estimate) %>% 
+  mutate(diff = logit - xgboost)
+```
+
+### ROC curves
+
+```{r}
+library(patchwork)
+
+p <- model_metrics %>% 
+  nest(- model_type) %>% 
+  mutate(plot = map2(data, model_type,  function(.x, title) {
+    .x %>% 
+      group_by(id) %>% 
+      yardstick::roc_curve(true, pred_prob) %>% 
+      autoplot() +
+      labs(subtitle = glue::glue("ROC for {title}"))
+  })) %>% 
+  pull(plot) %>% 
+  reduce(`/`) # patchwork does its magic by reassinging the "/" operator for ggplot objects
+p
+```
+
+## Best Model
+
+```{r}
+best_model_metric <- auc %>% 
+  filter(.metric == "roc_auc") %>% 
+  filter(.estimate == max(.estimate))
+
+best_model <- df %>% 
+  right_join(best_model_metric, by = c("id", "model_type")) %>% 
+  pull(model_trained) %>% 
+  .[[1]]
+
+best_model_spec <- df %>% 
+  right_join(best_model_metric, by = c("id", "model_type")) %>% 
+  pull(model_spec) %>% 
+  .[[1]]
+```
+
+## Best model on test set
+
+* Retrain the best model using on whole dataset.
+
+```{r}
+prepped_rec <- recipes::prep(rec, data = train)
+train_preprocessed <- recipes::juice(prepped_rec)
+
+best_model_on_train <- best_model_spec %>% 
+  fit(income ~ ., data = train_preprocessed)
+
+test_processed <- bake(prepped_rec, new_data = test)
+
+prediction <- predict_classprob(best_model_on_train, new_data = test_processed)
+
+auc_test <- bind_cols(prediction, test_processed['income']) %>% 
+  yardstick::roc_auc(income, `under 50k`)
+
+glue::glue("
+The best model has had an AUC of:
+    * {scales::percent(best_model_metric$.estimate)} on cross-validation.
+    * {scales::percent(auc_test$.estimate)} on test data.
+")
+```
+
+## Unseen data
+
+* Read in data.
+* Take out all respondents under 16.
+
+```{r}
+unseen_data_raw <- readr::read_csv(here("us_census_full/census_income_test.csv"), 
+                             col_names = col_names, 
+                             na = "?") 
+
+unseen_data <- unseen_data_raw %>% 
+  mutate(id = row_number(),
+         income = ifelse(income == "- 50000.", "under 50k", "over 50k"))
+
+# Take children out
+unseen_data_children <- unseen_data %>% 
+  filter(age <= 16)
+
+unseen_data <- unseen_data %>% filter(age > 16)
+```
+
+
+```{r}
+unseen_data_processed <- bake(prepped_rec, new_data = unseen_data)
+
+prediction_unseen <- parsnip::predict_classprob(best_model_on_train,
+                                                new_data = unseen_data_processed) %>% 
+  bind_cols(unseen_data_processed['income'])
+
+# Add prediction for children: all are low income
+prediction_unseen_children <- unseen_data_children %>%
+  transmute(income = factor(income, levels =  c("over 50k", "under 50k")),
+            `over 50k` = 0, 
+            `under 50k` = 1)
+
+# Add children back
+prediction_unseen_all <- bind_rows(prediction_unseen, prediction_unseen_children)
+
+auc_unseen <- prediction_unseen_all %>% 
+  yardstick::roc_auc(income, `under 50k`)
+
+auc_unseen
+```
+
+## Further Exploration
+
+* Grid search for model tuning
+* Deeper dive into the features: 
+  * better feature selection
+  * feature engineering 
+
+# Scratch =======
+
+```{r}
+knitr::knit_exit()
+```
+
+## Save design matrix specfication and trained model
+
+```{r}
+save(prepped_rec, file = "model/design_matrix_spec.rds")
+save(best_model_on_train, file = "model/best_model.rds")
+```

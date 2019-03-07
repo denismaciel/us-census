@@ -8,8 +8,8 @@ The analysis was done in R using the `tidyverse`. `tidymodels` was used for the 
 
 The analysis consists of:
 
-* [an exploratory part](Rmd/eda.md)
-* [some modeling](Rmd/modeling.md)
+* [an exploratory part](Rmd/eda.md),
+* and [a modeling part](Rmd/modeling.md).
 
 
 In order to be able to run the Rmarkdown files locally, you first need to unzip the compressed data:

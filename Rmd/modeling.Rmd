@@ -2,11 +2,15 @@
 title: "Modeling"
 author: "Denis Maciel"
 date: "06/03/2019"
-output: html_document
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
 ```
 
 ```{r}
@@ -80,21 +84,18 @@ us_census <- us_census %>%
   filter(age > 16)
 ```
 
-A note on terminology:
+## A note on terminology and the methodology:
 
+* We will split the initial data set into two.
 * Train and test refer to the initial split. We won't be looking at the test at all during the whole analysis.
 * In order to train the models, we will be using cross-validation, i.e. the train set will be divided into subsamples. 
-* *Analysis set* is the data the model is trained on.
-* *Assessment set* is the data over which the model's accuracy is measured.
+* In the subsamples:
+  * *Analysis set* is the data the model is trained on.
+  * *Assessment set* is the data over which the model's accuracy is measured.
+* The model specification that has the best performance will then be fitted again using the entirety of train and evaluated on test.
+* Finally, we will load in what we call `unseen_data`. In our context, this data set should be seen as when our model is deployed to production. We also assess our model on it. 
 
 ```{r}
-# us_census <- us_census %>% 
-#   dplyr::sample_frac(0.1)
-```
-
-
-```{r}
-UPSAMPLE = TRUE
 # # Use percentage of data to speed up training
 # us_census <- us_census %>%
 #   dplyr::sample_frac(0.15)
@@ -107,10 +108,18 @@ train <- rsample::training(initial_split)
 test <- rsample::testing(initial_split)
 ```
 
-Upsample
+## Downsampling
+
+`income`, our target variable, is very imbalanced. To account for that, we will downsample the class `under 50k`, so that both classes end up with the same amount of observations in the training set.
+
+This is not a universally valid approach. The reader can rerun the model without the downsampling set by setting the flag variable `DOWNSAMPLE` below to `FALSE`.
 
 ```{r}
-if (UPSAMPLE) {
+DOWNSAMPLE <- TRUE
+```
+
+```{r}
+if (DOWNSAMPLE) {
   N_HIGH_INCOMES <- train %>% 
     filter(income == "over 50k") %>% 
     nrow()
@@ -125,7 +134,9 @@ if (UPSAMPLE) {
 }
 ```
 
-Prepare the design matrix and create cross-validation.
+Here we create our design matrix. We apply the steps discussed in the "Exploratory Data Analysis part". The good thing about creating such a design matrix is that we can reapply it to bring new data (here: `test` and `unseen_data`) into format required by our model.
+
+Prepare the design matrix and create cross-validation dataframe.
 
 ```{r}
 library(recipes)
@@ -134,14 +145,20 @@ library(purrr)
 rec <-  train %>% 
   select(-id,
          -year,
-         -starts_with("migration_"),
+         -starts_with("migration_"), # too many missings
          -ends_with("_recode"),
          -instance_weight) %>% 
   recipe(income ~ .) %>% 
-  step_other(all_predictors(), -all_numeric(), threshold = 0.10) %>% 
   step_modeimpute(all_nominal()) %>% 
   step_meanimpute(all_numeric()) %>% 
-  step_dummy(all_predictors(), -all_numeric())
+  step_other(all_predictors(), -all_numeric(), threshold = 0.10) %>% 
+  step_discretize(own_business_or_self_employed, veterans_benefits) %>% 
+  step_mutate(wage_per_hour = wage_per_hour + 0.1,
+              capital_losses = capital_losses + 0.1, 
+              dividends_from_stocks = dividends_from_stocks + 0.1, 
+              capital_gains = dividends_from_stocks + 0.1) %>% 
+  step_dummy(all_predictors(), -all_numeric()) %>% 
+  step_log(wage_per_hour, capital_losses, dividends_from_stocks, capital_gains)
 
 df <- rsample::vfold_cv(train, v = 5)
 
@@ -177,10 +194,13 @@ df <- df %>%
 #   fit(income ~ ., data = processed_train)
 ```
 
+* Specify two models: a boosted tree and a logistic regression.
+* Train the two models in each one of the analaysis set coming from each one of the 5 splits.
+
 ```{r}
 library(parsnip)
 
-mod_spec_xgboost <- boost_tree(mode = "classification", trees = 20) %>%
+mod_spec_xgboost <- boost_tree(mode = "classification", trees = 50) %>%
   set_engine("C5.0")
 
 mod_spec_logit <- parsnip::logistic_reg(mode = "classification") %>%
@@ -200,6 +220,9 @@ df <- df %>%
 ```
 
 ## Model evaluation
+
+* Compute predictions on the assessment sets.
+* Assess models with accuracy and area under the curve.
 
 ```{r}
 predict_income_class <- function(test_data, model) {
@@ -223,6 +246,8 @@ model_metrics <- df %>%
 
 ### Accuracy
 
+* If the datasets have been downsampled, accuracy more of a meaningful metric, because there is no imbalance. If not, a high accuracy can be achieved by a naive model, which predicts all respondents to be low income, due to the imbalance of the class.
+
 ```{r}
 accuracy <- model_metrics %>% 
   mutate(is_correct = pred_class == true) %>% 
@@ -236,6 +261,8 @@ accuracy %>%
 ```
 
 ### Area under the curve
+
+* AUC is a better metric because it accounts for eventual imablances in the dataset.
 
 ```{r}
 auc <- model_metrics %>% 
@@ -251,6 +278,8 @@ auc %>%
 ```
 
 ### ROC curves
+
+* How do logit and boosted tree differ in their predictions?
 
 ```{r}
 library(patchwork)
@@ -271,6 +300,10 @@ p
 
 ## Best Model
 
+* Extract the best perfoming model from our collections of models.
+* Retrain the best model using on whole train dataset.
+* Assess model performance on test dataset.
+
 ```{r}
 best_model_metric <- auc %>% 
   filter(.metric == "roc_auc") %>% 
@@ -286,10 +319,6 @@ best_model_spec <- df %>%
   pull(model_spec) %>% 
   .[[1]]
 ```
-
-## Best model on test set
-
-* Retrain the best model using on whole dataset.
 
 ```{r}
 prepped_rec <- recipes::prep(rec, data = train)
@@ -314,8 +343,13 @@ The best model has had an AUC of:
 
 ## Unseen data
 
+Now let's test our model on the unseen data.
+
 * Read in data.
 * Take out all respondents under 16.
+* Predict on unseen
+* Add children back with prediction `under 50k`
+* Check area under the curve
 
 ```{r}
 unseen_data_raw <- readr::read_csv(here("us_census_full/census_income_test.csv"), 
@@ -332,7 +366,6 @@ unseen_data_children <- unseen_data %>%
 
 unseen_data <- unseen_data %>% filter(age > 16)
 ```
-
 
 ```{r}
 unseen_data_processed <- bake(prepped_rec, new_data = unseen_data)
@@ -363,11 +396,11 @@ auc_unseen
   * better feature selection
   * feature engineering 
 
-# Scratch =======
-
 ```{r}
 knitr::knit_exit()
 ```
+
+# Scratch =======
 
 ## Save design matrix specfication and trained model
 
